@@ -1,0 +1,137 @@
+﻿using System;
+using System.Linq;
+using Stump.Core.Reflection;
+using Stump.DofusProtocol.Enums;
+using System.Collections.Generic;
+using Stump.Server.WorldServer.Game.Maps;
+using Stump.Server.WorldServer.Game.Items;
+using Stump.Server.WorldServer.Handlers.Context;
+using Stump.Server.WorldServer.Game.Actors.Fight;
+using Stump.Server.WorldServer.Game.Fights.Teams;
+using Stump.Server.WorldServer.Game.Fights.Results;
+using Stump.Server.WorldServer.Game.Fights.Challenges;
+
+namespace Stump.Server.WorldServer.Game.Fights
+{
+    public class FightPvD : Fight<FightMonsterTeam, FightPlayerTeam>
+    {
+        private readonly Dictionary<byte, byte> _doplon = new Dictionary<byte, byte>
+        {
+            {20, 1}, {40, 2}, {60, 3}, {80, 5}, {100, 6}, {120, 8}, {140, 10}, {160, 12}, {180, 14}, {200, 17}, {220, 20}
+        };
+
+        private readonly Dictionary<byte, ushort> _doplonKamas = new Dictionary<byte, ushort>
+        {
+            {20, 50},{40, 200},{60, 450},{80, 800},{100, 1250},{120, 1800},{140, 2450},{160, 3200},{180, 4050},{200, 5000}, {220, 10000}
+        };
+
+        public FightPvD(int id, Map fightMap, FightMonsterTeam defendersTeam, FightPlayerTeam challengersTeam) : base(id, fightMap, defendersTeam, challengersTeam)
+        { }
+
+        public override bool IsPvP => false;
+
+        public override void StartPlacement()
+        {
+            base.StartPlacement();
+
+            m_placementTimer = Map.Area.CallDelayed(FightConfiguration.PlacementPhaseTime, StartFighting);
+        }
+
+        public override void StartFighting()
+        {
+            m_placementTimer.Dispose();
+
+            const int challengeAmount = 2;
+
+            ForEach(entry => ContextHandler.SendChallengeFightValidated(entry.Client, this, challengeAmount), false);
+
+            base.StartFighting();
+        }
+
+        protected override void OnFightStarted()
+        {
+            base.OnFightStarted();
+        }
+
+        protected override void OnFighterAdded(FightTeam team, FightActor actor)
+        {
+            base.OnFighterAdded(team, actor);
+
+            if (!(team is FightMonsterTeam))
+            {
+                BreedFighter = actor;
+            }
+        }
+
+        public FightActor BreedFighter { get; set; }
+
+        public override FightTypeEnum FightType => FightTypeEnum.FIGHT_TYPE_PvM;
+
+        protected override List<IFightResult> GetResults()
+        {
+            var list = GetFightersAndLeavers()
+                .Where(entry => !(entry is SummonedFighter))
+                .Select(entry => entry.GetFightResult())
+                .ToList();
+
+            if (Winners.Fighters.Contains(BreedFighter))
+            {
+                var dopple = Losers.Fighters.OfType<MonsterFighter>().FirstOrDefault();
+
+                if (dopple != null)
+                {
+                    var doppleGrade = dopple.Monster.Grade;
+                    var fightPlayerResults = list.OfType<FightPlayerResult>()
+                        .Where(fightPlayerResult => fightPlayerResult.Fighter.HasWin() && !Leavers.Contains(fightPlayerResult.Fighter))
+                        .ToList();
+
+                    var leaderResult = fightPlayerResults.FirstOrDefault(fightPlayerResult => fightPlayerResult.Fighter.IsTeamLeader());
+                    var otherResults = fightPlayerResults.Except(new[] { leaderResult });
+
+                    foreach (var fightPlayerResult in fightPlayerResults)
+                    {
+                        if (fightPlayerResult == leaderResult)
+                        {
+                            Singleton<ItemManager>.Instance.CreateDopeul(((CharacterFighter)fightPlayerResult.Fighter).Character, dopple.Monster.Template.Id);
+                            fightPlayerResult.AddEarnedExperience(doppleGrade.GradeXp);
+                            fightPlayerResult.Loot.Kamas = _doplonKamas[(byte)doppleGrade.Level];
+                            fightPlayerResult.Loot.AddItem(13052, _doplon[(byte)doppleGrade.Level]);
+                        }
+                        else
+                        {
+                            fightPlayerResult.AddEarnedExperience(0);
+                            fightPlayerResult.Loot.Kamas = 0;
+                        }
+                    }
+                }
+            }
+
+            return list;
+        }
+
+        protected override void SendGameFightJoinMessage(CharacterFighter fighter)
+        {
+            ContextHandler.SendGameFightJoinMessage(fighter.Character.Client, true, true, IsStarted, IsStarted ? 0 : (int)GetPlacementTimeLeft().TotalMilliseconds / 10000, FightType);
+        }
+
+        protected override bool CanCancelFight() => false;
+
+        public override TimeSpan GetPlacementTimeLeft()
+        {
+            var timeleft = FightConfiguration.PlacementPhaseTime - (DateTime.Now - CreationTime).TotalMilliseconds;
+
+            if (timeleft < 0)
+                timeleft = 0;
+
+            return TimeSpan.FromMilliseconds(timeleft);
+        }
+
+        protected override void OnDisposed()
+        {
+            if (m_placementTimer != null)
+                m_placementTimer.Dispose();
+
+            base.OnDisposed();
+        }
+    }
+}
